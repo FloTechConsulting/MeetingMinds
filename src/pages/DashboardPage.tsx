@@ -79,6 +79,23 @@ const DashboardPage: React.FC = () => {
                   <code className="bg-gray-100 px-2 py-1 rounded text-xs block">
                     {import.meta.env.VITE_SUPABASE_URL}/functions/v1/webhook-receiver
                   </code>
+                  <p className="text-xs text-gray-600 mt-2">
+                    <strong>Required JSON format:</strong>
+                  </p>
+                  <code className="bg-gray-100 px-2 py-1 rounded text-xs block whitespace-pre">
+{`{
+  "body": {
+    "FireFlies_API_KEY": "your-api-key",
+    "transcripts": [
+      {
+        "title": "Meeting Title",
+        "id": "meeting-id",
+        "date": "2025-01-15T10:00:00.000Z"
+      }
+    ]
+  }
+}`}
+                  </code>
                   <div className="flex gap-2">
                     <button
                       onClick={() => {
@@ -89,9 +106,6 @@ const DashboardPage: React.FC = () => {
                     >
                       Refresh Data
                     </button>
-                    <span className="text-xs text-gray-500">
-                      Data stored in Firebase per user
-                    </span>
                   </div>
                 </div>
               </div>

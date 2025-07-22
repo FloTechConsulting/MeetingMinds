@@ -4,40 +4,44 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
 
-interface WebhookData {
+interface WebhookPayload {
   body: {
+    FireFlies_API_KEY: string;
     transcripts: Array<{
       title: string;
       id: string;
-      dateString: string;
+      date: string;
     }>;
   };
-  headers?: any;
-  method?: string;
-  uri?: string;
-  FireFlies_API_KEY?: string; // API key from webhook
   [key: string]: any;
 }
 
-// Firebase Admin SDK setup
-const firebaseConfig = {
-  apiKey: "AIzaSyASq3D3aqE3s3btLByc9qBIOYLunHX5hnY",
-  authDomain: "flotech-ec621.firebaseapp.com",
-  projectId: "flotech-ec621",
-  storageBucket: "flotech-ec621.firebasestorage.app",
-  messagingSenderId: "230547277917",
-  appId: "1:230547277917:web:06f2b256bd05f6725ba5b4",
-  measurementId: "G-PTXWLZZ9ZX"
-};
+interface UserRecord {
+  userId: string;
+  email: string;
+  displayName: string;
+  firefliesApiKey: string;
+  registrationStatus: string;
+  webhookRegistered: boolean;
+}
 
-// Initialize Firebase Admin (using REST API since we can't use Admin SDK in edge functions)
+// Firebase configuration
 const FIREBASE_PROJECT_ID = "flotech-ec621";
+const FIRESTORE_BASE_URL = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
 
-async function findUserByApiKey(apiKey: string) {
+/**
+ * Find user by Fireflies API key
+ */
+async function findUserByApiKey(apiKey: string): Promise<UserRecord | null> {
   try {
     console.log('🔍 Searching for user with API key:', apiKey ? 'provided' : 'missing');
     
-    // Use Firestore REST API to query users by firefliesApiKey
+    if (!apiKey) {
+      console.log('❌ No API key provided');
+      return null;
+    }
+
+    // Query users collection by firefliesApiKey
     const query = {
       structuredQuery: {
         from: [{ collectionId: "users" }],
@@ -52,16 +56,11 @@ async function findUserByApiKey(apiKey: string) {
       }
     };
 
-    const response = await fetch(
-      `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents:runQuery`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(query)
-      }
-    );
+    const response = await fetch(`${FIRESTORE_BASE_URL}:runQuery`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(query)
+    });
 
     if (!response.ok) {
       console.error('❌ Firestore query failed:', response.status, await response.text());
@@ -74,8 +73,19 @@ async function findUserByApiKey(apiKey: string) {
     if (result && result.length > 0 && result[0].document) {
       const userDoc = result[0].document;
       const userId = userDoc.name.split('/').pop();
-      console.log('✅ Found user:', userId);
-      return userId;
+      const fields = userDoc.fields;
+      
+      const userRecord: UserRecord = {
+        userId,
+        email: fields.email?.stringValue || '',
+        displayName: fields.displayName?.stringValue || '',
+        firefliesApiKey: fields.firefliesApiKey?.stringValue || '',
+        registrationStatus: fields.registrationStatus?.stringValue || 'unknown',
+        webhookRegistered: fields.webhookRegistered?.booleanValue || false
+      };
+      
+      console.log('✅ Found user:', userRecord);
+      return userRecord;
     }
 
     console.log('❌ No user found with API key');
@@ -86,50 +96,57 @@ async function findUserByApiKey(apiKey: string) {
   }
 }
 
-async function storeMeetingsForUser(userId: string, meetings: any[]) {
+/**
+ * Store meetings in user's subcollection
+ */
+async function storeMeetingsForUser(userId: string, meetings: any[]): Promise<boolean> {
   try {
     console.log('💾 Storing meetings for user:', userId);
     console.log('📊 Meetings to store:', meetings.length);
 
-    // Store meetings in user's subcollection
-    const batch = {
-      writes: meetings.map(meeting => ({
-        update: {
-          name: `projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents/users/${userId}/meetings/${meeting.id}`,
-          fields: {
-            id: { stringValue: meeting.id },
-            title: { stringValue: meeting.title },
-            date: { stringValue: meeting.date },
-            duration: { stringValue: meeting.duration },
-            createdAt: { timestampValue: new Date().toISOString() },
-            updatedAt: { timestampValue: new Date().toISOString() }
-          }
-        },
-        updateMask: {
-          fieldPaths: ['id', 'title', 'date', 'duration', 'createdAt', 'updatedAt']
+    if (meetings.length === 0) {
+      console.log('⚠️ No meetings to store');
+      return true;
+    }
+
+    // Create batch write operations for all meetings
+    const writes = meetings.map(meeting => ({
+      update: {
+        name: `${FIRESTORE_BASE_URL}/users/${userId}/meetings/${meeting.id}`,
+        fields: {
+          id: { stringValue: meeting.id },
+          title: { stringValue: meeting.title },
+          date: { stringValue: meeting.date },
+          duration: { stringValue: meeting.duration || 'N/A' },
+          source: { stringValue: 'webhook' },
+          createdAt: { timestampValue: new Date().toISOString() },
+          updatedAt: { timestampValue: new Date().toISOString() }
         }
-      }))
-    };
-
-    const response = await fetch(
-      `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents:batchWrite`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(batch)
+      },
+      updateMask: {
+        fieldPaths: ['id', 'title', 'date', 'duration', 'source', 'createdAt', 'updatedAt']
       }
-    );
+    }));
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('❌ Failed to store meetings:', response.status, errorText);
+    // Execute batch write
+    const batchResponse = await fetch(`${FIRESTORE_BASE_URL}:batchWrite`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ writes })
+    });
+
+    if (!batchResponse.ok) {
+      const errorText = await batchResponse.text();
+      console.error('❌ Failed to store meetings:', batchResponse.status, errorText);
       return false;
     }
 
-    const result = await response.json();
-    console.log('✅ Successfully stored meetings:', result);
+    const batchResult = await batchResponse.json();
+    console.log('✅ Successfully stored meetings:', batchResult);
+
+    // Update user's last webhook received timestamp
+    await updateUserWebhookStatus(userId, meetings.length);
+
     return true;
   } catch (error) {
     console.error('❌ Error storing meetings:', error);
@@ -137,224 +154,258 @@ async function storeMeetingsForUser(userId: string, meetings: any[]) {
   }
 }
 
+/**
+ * Update user's webhook status
+ */
+async function updateUserWebhookStatus(userId: string, meetingCount: number): Promise<void> {
+  try {
+    const updateResponse = await fetch(`${FIRESTORE_BASE_URL}/users/${userId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fields: {
+          lastWebhookReceived: { timestampValue: new Date().toISOString() },
+          totalMeetingsReceived: { integerValue: meetingCount.toString() },
+          webhookStatus: { stringValue: 'active' },
+          updatedAt: { timestampValue: new Date().toISOString() }
+        },
+        updateMask: {
+          fieldPaths: ['lastWebhookReceived', 'totalMeetingsReceived', 'webhookStatus', 'updatedAt']
+        }
+      })
+    });
+
+    if (updateResponse.ok) {
+      console.log('✅ Updated user webhook status');
+    } else {
+      console.error('❌ Failed to update user webhook status');
+    }
+  } catch (error) {
+    console.error('❌ Error updating user webhook status:', error);
+  }
+}
+
+/**
+ * Validate webhook payload structure
+ */
+function validateWebhookPayload(payload: any): { isValid: boolean; error?: string } {
+  if (!payload) {
+    return { isValid: false, error: 'Empty payload' };
+  }
+
+  if (!payload.body) {
+    return { isValid: false, error: 'Missing body in payload' };
+  }
+
+  if (!payload.body.FireFlies_API_KEY) {
+    return { isValid: false, error: 'Missing FireFlies_API_KEY in payload.body' };
+  }
+
+  if (!payload.body.transcripts) {
+    return { isValid: false, error: 'Missing transcripts in payload.body' };
+  }
+
+  if (!Array.isArray(payload.body.transcripts)) {
+    return { isValid: false, error: 'Transcripts must be an array' };
+  }
+
+  // Validate each transcript
+  for (let i = 0; i < payload.body.transcripts.length; i++) {
+    const transcript = payload.body.transcripts[i];
+    if (!transcript.id || !transcript.title || !transcript.date) {
+      return { 
+        isValid: false, 
+        error: `Invalid transcript at index ${i}: missing required fields (id, title, date)` 
+      };
+    }
+  }
+
+  return { isValid: true };
+}
+
+/**
+ * Transform transcripts to meeting format
+ */
+function transformTranscriptsToMeetings(transcripts: any[]): any[] {
+  return transcripts.map(transcript => ({
+    id: transcript.id,
+    title: transcript.title,
+    date: new Date(transcript.date).toISOString().split('T')[0], // Convert to YYYY-MM-DD
+    duration: transcript.duration || 'N/A',
+    originalDate: transcript.date
+  }));
+}
+
+/**
+ * Main webhook handler
+ */
 Deno.serve(async (req: Request) => {
+  console.log('🚀 Webhook receiver started');
+  console.log('📡 Method:', req.method);
+  console.log('🌐 URL:', req.url);
+
   // Handle CORS preflight requests
   if (req.method === "OPTIONS") {
-    return new Response(null, {
-      status: 200,
-      headers: corsHeaders,
-    });
+    console.log('✅ Handling CORS preflight');
+    return new Response(null, { status: 200, headers: corsHeaders });
+  }
+
+  if (req.method !== "POST") {
+    console.log('❌ Method not allowed:', req.method);
+    return new Response(
+      JSON.stringify({ 
+        success: false,
+        error: "Method not allowed",
+        allowedMethods: ["POST"]
+      }),
+      { 
+        status: 405, 
+        headers: { "Content-Type": "application/json", ...corsHeaders }
+      }
+    );
   }
 
   try {
-    console.log('📨 Received webhook request');
-    console.log('🔧 Method:', req.method);
-
-    if (req.method !== "POST") {
-      return new Response(
-        JSON.stringify({ error: "Method not allowed" }),
-        {
-          status: 405,
-          headers: {
-            "Content-Type": "application/json",
-            ...corsHeaders,
-          },
-        }
-      );
-    }
-
-    // Get the raw body
+    // Parse request body
     const rawBody = await req.text();
     console.log('📄 Raw body length:', rawBody.length);
-
+    
     if (!rawBody || rawBody.trim() === '') {
+      console.log('❌ Empty request body');
       return new Response(
-        JSON.stringify({ error: "Empty request body" }),
-        {
-          status: 400,
-          headers: {
-            "Content-Type": "application/json",
-            ...corsHeaders,
-          },
+        JSON.stringify({ 
+          success: false,
+          error: "Empty request body" 
+        }),
+        { 
+          status: 400, 
+          headers: { "Content-Type": "application/json", ...corsHeaders }
         }
       );
     }
 
-    // Parse the JSON
-    let webhookData: WebhookData | WebhookData[];
+    let payload: WebhookPayload;
     try {
-      webhookData = JSON.parse(rawBody.trim());
+      payload = JSON.parse(rawBody.trim());
+      console.log('✅ Successfully parsed JSON payload');
+      console.log('📊 Payload keys:', Object.keys(payload));
     } catch (parseError) {
       console.error('❌ JSON parsing error:', parseError);
       return new Response(
         JSON.stringify({ 
+          success: false,
           error: "Invalid JSON format",
-          message: parseError.message
+          details: parseError.message
         }),
-        {
-          status: 400,
-          headers: {
-            "Content-Type": "application/json",
-            ...corsHeaders,
-          },
+        { 
+          status: 400, 
+          headers: { "Content-Type": "application/json", ...corsHeaders }
         }
       );
     }
-    
-    console.log('📊 Parsed webhook data keys:', Object.keys(webhookData));
 
-    // Handle both single object and array formats
-    let dataObject: WebhookData;
-    if (Array.isArray(webhookData)) {
-      if (webhookData.length === 0) {
-        return new Response(
-          JSON.stringify({ error: "Empty webhook data array" }),
-          {
-            status: 400,
-            headers: {
-              "Content-Type": "application/json",
-              ...corsHeaders,
-            },
-          }
-        );
-      }
-      dataObject = webhookData[0];
-    } else {
-      dataObject = webhookData;
-    }
-
-    // Extract API key from webhook data
-    const apiKey = dataObject.FireFlies_API_KEY;
-    console.log('🔑 API key in webhook:', apiKey ? 'provided' : 'missing');
-
-    if (!apiKey) {
+    // Validate payload structure
+    const validation = validateWebhookPayload(payload);
+    if (!validation.isValid) {
+      console.error('❌ Payload validation failed:', validation.error);
       return new Response(
         JSON.stringify({ 
-          error: "Missing FireFlies_API_KEY in webhook data",
-          message: "The webhook must include the FireFlies_API_KEY to identify the user"
+          success: false,
+          error: "Invalid payload structure",
+          details: validation.error
         }),
-        {
-          status: 400,
-          headers: {
-            "Content-Type": "application/json",
-            ...corsHeaders,
-          },
+        { 
+          status: 400, 
+          headers: { "Content-Type": "application/json", ...corsHeaders }
         }
       );
     }
+
+    // Extract API key and transcripts
+    const apiKey = payload.body.FireFlies_API_KEY;
+    const transcripts = payload.body.transcripts;
+    
+    console.log('🔑 API Key:', apiKey ? 'provided' : 'missing');
+    console.log('📋 Transcripts count:', transcripts.length);
 
     // Find user by API key
-    const userId = await findUserByApiKey(apiKey);
-    if (!userId) {
+    const user = await findUserByApiKey(apiKey);
+    if (!user) {
+      console.error('❌ User not found for API key');
       return new Response(
         JSON.stringify({ 
+          success: false,
           error: "User not found",
-          message: "No user found with the provided FireFlies_API_KEY"
+          details: "No user found with the provided FireFlies_API_KEY"
         }),
-        {
-          status: 404,
-          headers: {
-            "Content-Type": "application/json",
-            ...corsHeaders,
-          },
+        { 
+          status: 404, 
+          headers: { "Content-Type": "application/json", ...corsHeaders }
         }
       );
     }
 
-    // Extract transcripts
-    let transcripts;
-    if (dataObject.body && dataObject.body.transcripts) {
-      transcripts = dataObject.body.transcripts;
-    } else if (dataObject.transcripts) {
-      transcripts = dataObject.transcripts;
-    } else {
-      return new Response(
-        JSON.stringify({ 
-          error: "Missing transcripts data in webhook payload"
-        }),
-        {
-          status: 400,
-          headers: {
-            "Content-Type": "application/json",
-            ...corsHeaders,
-          },
-        }
-      );
-    }
+    console.log('👤 Found user:', user.userId, user.email);
 
-    if (!Array.isArray(transcripts)) {
-      return new Response(
-        JSON.stringify({ error: "Transcripts must be an array" }),
-        {
-          status: 400,
-          headers: {
-            "Content-Type": "application/json",
-            ...corsHeaders,
-          },
-        }
-      );
-    }
+    // Transform transcripts to meetings
+    const meetings = transformTranscriptsToMeetings(transcripts);
+    console.log('🔄 Transformed meetings:', meetings.length);
 
-    // Transform transcripts to meetings format
-    const meetings = transcripts.map((transcript) => ({
-      id: transcript.id,
-      title: transcript.title,
-      date: new Date(transcript.dateString).toISOString().split('T')[0],
-      duration: 'N/A'
-    }));
-
-    console.log('📋 Transformed meetings:', meetings.length);
-
-    // Store meetings for the user
-    const stored = await storeMeetingsForUser(userId, meetings);
+    // Store meetings for user
+    const stored = await storeMeetingsForUser(user.userId, meetings);
     
     if (!stored) {
+      console.error('❌ Failed to store meetings');
       return new Response(
         JSON.stringify({ 
-          error: "Failed to store meetings",
-          message: "Could not save meetings to database"
+          success: false,
+          error: "Storage failed",
+          details: "Could not save meetings to database"
         }),
-        {
-          status: 500,
-          headers: {
-            "Content-Type": "application/json",
-            ...corsHeaders,
-          },
+        { 
+          status: 500, 
+          headers: { "Content-Type": "application/json", ...corsHeaders }
         }
       );
     }
 
+    // Success response
+    const response = {
+      success: true,
+      message: "Webhook processed successfully",
+      data: {
+        userId: user.userId,
+        userEmail: user.email,
+        meetingsProcessed: meetings.length,
+        timestamp: new Date().toISOString()
+      },
+      meetings: meetings
+    };
+
+    console.log('✅ Webhook processing completed successfully');
+    console.log('📊 Response:', response);
+
     return new Response(
-      JSON.stringify({ 
-        success: true, 
-        message: "Webhook data processed and stored successfully",
-        userId: userId,
-        meetingsCount: meetings.length,
-        meetings: meetings
-      }),
-      {
-        status: 200,
-        headers: {
-          "Content-Type": "application/json",
-          ...corsHeaders,
-        },
+      JSON.stringify(response),
+      { 
+        status: 200, 
+        headers: { "Content-Type": "application/json", ...corsHeaders }
       }
     );
 
   } catch (error) {
-    console.error('❌ Error processing webhook:', error);
+    console.error('❌ Unexpected error processing webhook:', error);
     
     return new Response(
       JSON.stringify({ 
+        success: false,
         error: "Internal server error",
-        message: error.message
+        details: error.message,
+        timestamp: new Date().toISOString()
       }),
-      {
-        status: 500,
-        headers: {
-          "Content-Type": "application/json",
-          ...corsHeaders,
-        },
+      { 
+        status: 500, 
+        headers: { "Content-Type": "application/json", ...corsHeaders }
       }
     );
   }

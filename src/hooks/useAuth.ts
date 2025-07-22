@@ -17,23 +17,30 @@ import { auth, db } from '../lib/firebase'
 // Function to send API key to webhook
 const sendApiKeyToWebhook = async (apiKey: string) => {
   try {
+    console.log('📡 Sending API key to registration webhook...');
     const response = await fetch('https://flotech123.app.n8n.cloud/webhook/7eed2ed4-73cc-4584-af8c-fd5e1fa8db6f', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        FireFlies_API_KEY: apiKey
+        FireFlies_API_KEY: apiKey,
+        action: 'user_registration',
+        timestamp: new Date().toISOString()
       })
     });
     
     if (!response.ok) {
-      console.error('Failed to send API key to webhook:', response.statusText);
+      console.error('❌ Failed to send API key to registration webhook:', response.statusText);
+      throw new Error(`Registration webhook failed: ${response.statusText}`);
     } else {
-      console.log('API key sent to webhook successfully');
+      console.log('✅ API key sent to registration webhook successfully');
+      const result = await response.json();
+      console.log('📋 Registration webhook response:', result);
     }
   } catch (error) {
-    console.error('Error sending API key to webhook:', error);
+    console.error('❌ Error sending API key to registration webhook:', error);
+    throw error; // Re-throw to handle in signup flow
   }
 };
 
@@ -67,6 +74,11 @@ export const useAuth = () => {
   const signUp = async (email: string, password: string, fullName?: string, firefliesApiKey?: string) => {
     try {
       console.log('Starting signup process...', { email, fullName, firefliesApiKey: firefliesApiKey ? 'provided' : 'not provided' });
+      
+      if (!firefliesApiKey) {
+        throw new Error('Fireflies API key is required for registration');
+      }
+      
       const userCredential = await createUserWithEmailAndPassword(auth, email, password)
       console.log('User created in Auth:', userCredential.user.uid);
       
@@ -77,29 +89,43 @@ export const useAuth = () => {
         })
         console.log('Profile updated with display name');
 
-        // Store Fireflies API key in Firestore
-        if (firefliesApiKey) {
-          console.log('Attempting to store user data in Firestore...');
-          const userData = {
-            firefliesApiKey: firefliesApiKey,
-            email: email,
-            displayName: fullName || email.split('@')[0],
-            createdAt: new Date()
-          };
-          console.log('User data to store:', userData);
-          
-          await setDoc(doc(db, 'users', userCredential.user.uid), {
-            firefliesApiKey: firefliesApiKey,
-            email: email,
-            displayName: fullName || email.split('@')[0],
-            createdAt: new Date()
-          });
-          console.log('User data stored successfully in Firestore');
-          
-          // Send API key to webhook after successful signup
+        // Store user data in Firestore with comprehensive information
+        console.log('📝 Storing user data in Firestore...');
+        const userData = {
+          firefliesApiKey: firefliesApiKey,
+          email: email,
+          displayName: fullName || email.split('@')[0],
+          userId: userCredential.user.uid,
+          registrationStatus: 'pending',
+          webhookRegistered: false,
+          createdAt: new Date(),
+          updatedAt: new Date()
+        };
+        console.log('📊 User data to store:', userData);
+        
+        await setDoc(doc(db, 'users', userCredential.user.uid), userData);
+        console.log('✅ User data stored successfully in Firestore');
+        
+        try {
+          // Send API key to registration webhook
           await sendApiKeyToWebhook(firefliesApiKey);
-        } else {
-          console.log('No Fireflies API key provided, skipping Firestore storage');
+          
+          // Update registration status to completed
+          await updateDoc(doc(db, 'users', userCredential.user.uid), {
+            registrationStatus: 'completed',
+            webhookRegistered: true,
+            updatedAt: new Date()
+          });
+          console.log('✅ Registration webhook completed successfully');
+        } catch (webhookError) {
+          console.error('❌ Registration webhook failed:', webhookError);
+          // Update status to failed but don't prevent user creation
+          await updateDoc(doc(db, 'users', userCredential.user.uid), {
+            registrationStatus: 'webhook_failed',
+            webhookError: webhookError.message,
+            updatedAt: new Date()
+          });
+          // Don't throw error - user account is still created
         }
       }
       

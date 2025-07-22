@@ -50,6 +50,13 @@ const LoginPage: React.FC = () => {
     const fullName = formData.get('fullName') as string;
     const firefliesApiKey = formData.get('firefliesApiKey') as string;
     
+    // Validate required fields
+    if (!email || !password || !firefliesApiKey) {
+      setError('Email, password, and Fireflies API key are required');
+      setIsLoading(false);
+      return;
+    }
+    
     // Validate passwords match
     if (password !== confirmPassword) {
       setError('Passwords do not match');
@@ -61,7 +68,11 @@ const LoginPage: React.FC = () => {
       const { error } = await signUp(email, password, fullName, firefliesApiKey);
       
       if (error) {
-        setError(error.message);
+        if (error.message.includes('webhook')) {
+          setError('Account created but webhook registration failed. Please contact support.');
+        } else {
+          setError(error.message);
+        }
         setIsLoading(false);
         return;
       }

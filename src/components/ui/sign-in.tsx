@@ -109,10 +109,10 @@ export const SignInPage: React.FC<SignInPageProps> = ({
                 <div className="animate-element animate-delay-375">
                   <label className="text-sm font-medium text-gray-600 md:text-sm">Fireflies API Key</label>
                   <GlassInputWrapper>
-                    <input name="firefliesApiKey" type="password" placeholder="Enter your Fireflies API key" className="w-full bg-transparent text-base p-4 rounded-2xl focus:outline-none md:text-sm md:p-4" />
+                    <input name="firefliesApiKey" type="password" placeholder="Enter your Fireflies API key" required className="w-full bg-transparent text-base p-4 rounded-2xl focus:outline-none md:text-sm md:p-4" />
                   </GlassInputWrapper>
                   <p className="text-xs text-gray-500 mt-1">
-                    Get your API key from <a href="https://fireflies.ai" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">Fireflies.ai</a>
+                    Required: Get your API key from <a href="https://fireflies.ai" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">Fireflies.ai</a> → Settings → Integrations → API
                   </p>
                 </div>
               )}
